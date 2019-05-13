@@ -54,22 +54,32 @@ local ewmh = {
 --- Update a client's settings when its geometry changes, skipping signals
 -- resulting from calls within.
 local repair_geometry_lock = false
-local function repair_geometry(window)
+local function repair_geometry(c)
     if repair_geometry_lock then return end
-    repair_geometry_lock = true
 
-    -- Re-apply the geometry locking properties to what they should be.
-    for _, prop in ipairs {
-        "fullscreen", "maximized", "maximized_vertical", "maximized_horizontal"
-    } do
-        if window[prop] then
-            window:emit_signal("request::geometry", prop, {
-                store_geometry = false
-            })
-            break
-        end
+    local placement = nil
+    if c.fullscreen or c.maximized or (c.maximized_horizontal and c.maximized_vertical) then
+        placement = "maximize"
+    elseif c.maximized_horizontal then
+        placement = "maximize_horizontally"
+    elseif c.maximized_vertical then
+        placement = "maximize_vertically"
+    else
+        return
     end
 
+    local props = {}
+    props.honor_workarea = not c.fullscreen
+    props.honor_padding = props.honor_workarea and (beautiful.maximized_honor_padding ~= false)
+
+    if (c.fullscreen and beautiful.fullscreen_hide_border ~= false) or
+       (placement == "maximize" and beautiful.maximized_hide_border == true) then
+        props.ignore_border_width = true
+        props.zap_border_width = true
+    end
+
+    repair_geometry_lock = true
+    aplace[placement](c, props)
     repair_geometry_lock = false
 end
 
@@ -257,12 +267,11 @@ function ewmh.urgent(c, urgent)
     end
 end
 
--- Map the state to the action name
-local context_mapper = {
-    maximized_vertical   = "maximize_vertically",
-    maximized_horizontal = "maximize_horizontally",
-    maximized            = "maximize",
-    fullscreen           = "maximize"
+local is_immobilizing = {
+    maximized_vertical   = true,
+    maximized_horizontal = true,
+    maximized            = true,
+    fullscreen           = true
 }
 
 --- Move and resize the client.
@@ -274,6 +283,10 @@ local context_mapper = {
 -- @tparam string context The context
 -- @tparam[opt={}] table hints The hints to pass to the handler
 function ewmh.geometry(c, context, hints)
+    if not is_immobilizing[context] then
+        return
+    end
+
     local layout = c.screen.selected_tag and c.screen.selected_tag.layout or nil
 
     -- Setting the geometry will not work unless the client is floating.
@@ -281,55 +294,40 @@ function ewmh.geometry(c, context, hints)
         return
     end
 
-    context = context or ""
+    local restore = {}
 
-    local original_context = context
-
-    -- Now, map it to something useful
-    context = context_mapper[context] or context
-
-    local props = gtable.clone(hints or {}, false)
-    props.store_geometry = props.store_geometry==nil and true or props.store_geometry
-
-    -- If it is a known placement function, then apply it, otherwise let
-    -- other potential handler resize the client (like in-layout resize or
-    -- floating client resize)
-    if aplace[context] then
-
-        -- Check if it corresponds to a boolean property.
-        local state = c[original_context]
-
-        -- If the property is boolean and it corresponds to the undo operation,
-        -- restore the stored geometry.
-        if state == false then
-            local original = repair_geometry_lock
-            repair_geometry_lock = true
-            aplace.restore(c, {context=context})
-            repair_geometry_lock = original
-            return
+    if c.immobilized_horizontal then
+        if c._saved_x == nil then
+            c._saved_x     = c.x
+            c._saved_width = c.width
         end
+    elseif c._saved_x ~= nil then
+        restore.x     = c._saved_x
+        restore.width = c._saved_width
+        c._saved_x     = nil
+        c._saved_width = nil
+    end
 
-        local honor_default = original_context ~= "fullscreen"
-
-        if props.honor_workarea == nil then
-            props.honor_workarea = honor_default
+    if c.immobilized_vertical then
+        if c._saved_y == nil then
+            c._saved_y      = c.y
+            c._saved_height = c.height
         end
+    elseif c._saved_y ~= nil then
+        restore.y      = c._saved_y
+        restore.height = c._saved_height
+        c._saved_y      = nil
+        c._saved_height = nil
+    end
 
-        if props.honor_padding == nil and props.honor_workarea and context:match("maximize") then
-            props.honor_padding = beautiful.maximized_honor_padding ~= false
-        end
-
-        if (original_context == "fullscreen" and beautiful.fullscreen_hide_border ~= false) or
-           (original_context == "maximized" and beautiful.maximized_hide_border == true) then
-            props.ignore_border_width = true
-            props.zap_border_width = true
-        end
-
+    if restore.x ~= nil or restore.y ~= nil then
         local original = repair_geometry_lock
         repair_geometry_lock = true
-        aplace[context](c, props)
+        c:geometry(restore)
         repair_geometry_lock = original
     end
+
+    repair_geometry(c)
 end
 
 --- Merge the 2 requests sent by clients wanting to be maximized.
